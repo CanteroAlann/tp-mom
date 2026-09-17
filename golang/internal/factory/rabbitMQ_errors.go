@@ -10,4 +10,5 @@ var (
 	ErrRabbitMQDeclareQueue             = errors.New("error declaring RabbitMQ queue")
 	ErrRabbitMQCreateExchangeMiddleware = errors.New("error creating RabbitMQ exchange middleware")
 	ErrRabbitMQDeclareExchange          = errors.New("error declaring RabbitMQ exchange")
+	ErrRabbitMQCreatingConnection       = errors.New("error creating RabbitMQ connection")
 )

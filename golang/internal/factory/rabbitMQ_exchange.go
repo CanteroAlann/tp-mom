@@ -11,8 +11,7 @@ import (
 )
 
 type RabbitMQExchange struct {
-	conn      *amqp.Connection
-	ch        *amqp.Channel
+	conn      *RabbitMQConnection
 	exchange  string
 	keys      []string
 	queueName string
@@ -23,17 +22,12 @@ type RabbitMQExchange struct {
 }
 
 func NewRabbitMQExchange(exchange string, keys []string, settings m.ConnSettings) (*RabbitMQExchange, error) {
-	url := fmt.Sprintf("amqp://guest:guest@%s:%d/", settings.Hostname, settings.Port)
-	conn, err := amqp.Dial(url)
+	conn, err := NewRabbitMQConnection(settings.Hostname, settings.Port)
 	if err != nil {
-		return nil, ErrRabbitMQCreateExchangeMiddleware
+		return nil, err
 	}
 
-	ch, err := conn.Channel()
-	if err != nil {
-		conn.Close()
-		return nil, ErrRabbitMQCreateChannel
-	}
+	ch := conn.GetChannel()
 
 	err = ch.ExchangeDeclare(
 		exchange, // name
@@ -45,7 +39,6 @@ func NewRabbitMQExchange(exchange string, keys []string, settings m.ConnSettings
 		nil,      // arguments
 	)
 	if err != nil {
-		ch.Close()
 		conn.Close()
 		return nil, ErrRabbitMQDeclareExchange
 	}
@@ -59,7 +52,6 @@ func NewRabbitMQExchange(exchange string, keys []string, settings m.ConnSettings
 		nil,
 	)
 	if err != nil {
-		ch.Close()
 		conn.Close()
 		return nil, ErrRabbitMQCreateExchangeMiddleware
 	}
@@ -73,7 +65,6 @@ func NewRabbitMQExchange(exchange string, keys []string, settings m.ConnSettings
 			nil,      // arguments
 		)
 		if err != nil {
-			ch.Close()
 			conn.Close()
 			return nil, ErrRabbitMQCreateExchangeMiddleware
 		}
@@ -81,7 +72,6 @@ func NewRabbitMQExchange(exchange string, keys []string, settings m.ConnSettings
 
 	return &RabbitMQExchange{
 		conn:      conn,
-		ch:        ch,
 		exchange:  exchange,
 		keys:      keys,
 		queueName: q.Name,
@@ -99,8 +89,9 @@ func (r *RabbitMQExchange) StartConsuming(callbackFunc func(msg m.Message, ack f
 	r.tag = fmt.Sprintf("consumer-%d", time.Now().UnixNano())
 	r.stopChan = make(chan struct{})
 	r.mu.Unlock()
+	ch := r.conn.GetChannel()
 
-	msgs, err := r.ch.Consume(
+	msgs, err := ch.Consume(
 		r.queueName, // queue
 		r.tag,       // consumer tag
 		false,       // auto-ack
@@ -155,7 +146,8 @@ func (r *RabbitMQExchange) StopConsuming() error {
 		return m.ErrMessageMiddlewareDisconnected
 	}
 
-	if err := r.ch.Cancel(r.tag, false); err != nil {
+	err := r.conn.StopConsuming(r.tag)
+	if err != nil {
 		return m.ErrMessageMiddlewareMessage
 	}
 	return nil
@@ -169,8 +161,10 @@ func (r *RabbitMQExchange) Send(msg m.Message) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	ch := r.conn.GetChannel()
+
 	for _, key := range r.keys {
-		err := r.ch.PublishWithContext(
+		err := ch.PublishWithContext(
 			ctx,
 			r.exchange, // exchange
 			key,        // routing key
@@ -200,19 +194,9 @@ func (r *RabbitMQExchange) Close() error {
 	}
 	r.mu.Unlock()
 
-	var errs []error
-	if r.ch != nil && !r.ch.IsClosed() {
-		if err := r.ch.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if r.conn != nil && !r.conn.IsClosed() {
-		if err := r.conn.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
+	err := r.conn.Close()
 
-	if len(errs) > 0 {
+	if err != nil {
 		return m.ErrMessageMiddlewareClose
 	}
 	return nil

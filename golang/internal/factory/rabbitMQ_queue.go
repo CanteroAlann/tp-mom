@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	m "github.com/7574-sistemas-distribuidos/tp-mom/golang/internal/middleware"
@@ -10,30 +11,25 @@ import (
 )
 
 type RabbitMQQueue struct {
-	conn      *amqp.Connection
-	ch        *amqp.Channel
+	conn      *RabbitMQConnection
 	queueName string
 	tag       string
 	consuming bool
 	stopChan  chan struct{}
+	lock      sync.Mutex
 }
 
 func NewRabbitMQQueue(queueName string, settings m.ConnSettings) (*RabbitMQQueue, error) {
-	url := fmt.Sprintf("amqp://guest:guest@%s:%d/", settings.Hostname, settings.Port)
-	conn, err := amqp.Dial(url)
+	conn, err := NewRabbitMQConnection(settings.Hostname, settings.Port)
 	if err != nil {
-		return nil, ErrRabbitMQCreateQueueMiddleware
+		return nil, err
 	}
 
-	ch, err := conn.Channel()
-	if err != nil {
-		conn.Close()
-		return nil, ErrRabbitMQCreateChannel
-	}
+	ch := conn.GetChannel()
 
 	_, err = ch.QueueDeclare(
 		queueName,
-		true,
+		false,
 		false,
 		false,
 		false,
@@ -47,7 +43,6 @@ func NewRabbitMQQueue(queueName string, settings m.ConnSettings) (*RabbitMQQueue
 
 	return &RabbitMQQueue{
 		conn:      conn,
-		ch:        ch,
 		queueName: queueName,
 		tag:       fmt.Sprintf("consumer-%s", queueName),
 		stopChan:  make(chan struct{}),
@@ -55,6 +50,8 @@ func NewRabbitMQQueue(queueName string, settings m.ConnSettings) (*RabbitMQQueue
 }
 
 func (r *RabbitMQQueue) Send(msg m.Message) error {
+	r.lock.Lock()
+	defer r.lock.Unlock()
 
 	if r.conn.IsClosed() {
 		return m.ErrMessageMiddlewareDisconnected
@@ -63,16 +60,17 @@ func (r *RabbitMQQueue) Send(msg m.Message) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := r.ch.PublishWithContext(
+	ch := r.conn.GetChannel()
+
+	err := ch.PublishWithContext(
 		ctx,
 		"",
 		r.queueName,
 		false,
 		false,
 		amqp.Publishing{
-			ContentType:  "text/plain",
-			DeliveryMode: amqp.Persistent,
-			Body:         []byte(msg.Body),
+			ContentType: "text/plain",
+			Body:        []byte(msg.Body),
 		},
 	)
 	if err != nil {
@@ -85,14 +83,18 @@ func (r *RabbitMQQueue) Send(msg m.Message) error {
 }
 
 func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) error {
+	r.lock.Lock()
 	if r.conn.IsClosed() {
+		r.lock.Unlock()
 		return m.ErrMessageMiddlewareDisconnected
 	}
 	if r.consuming {
+		r.lock.Unlock()
 		return nil
 	}
 
-	deliveries, err := r.ch.Consume(
+	ch := r.conn.GetChannel()
+	deliveries, err := ch.Consume(
 		r.queueName,
 		r.tag,
 		false,
@@ -102,11 +104,13 @@ func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func
 		nil,
 	)
 	if err != nil {
+		r.lock.Unlock()
 		return m.ErrMessageMiddlewareMessage
 	}
 
 	r.consuming = true
 	r.stopChan = make(chan struct{})
+	r.lock.Unlock()
 
 	for {
 		select {
@@ -114,10 +118,11 @@ func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func
 			return nil
 		case d, ok := <-deliveries:
 			if !ok {
+				r.lock.Lock()
 				r.consuming = false
+				r.lock.Unlock()
 				return m.ErrMessageMiddlewareDisconnected
 			}
-
 			ack := func() { _ = d.Ack(false) }
 			nack := func() { _ = d.Nack(false, true) }
 
@@ -127,6 +132,9 @@ func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func
 }
 
 func (r *RabbitMQQueue) StopConsuming() error {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
 	if !r.consuming {
 		return nil
 	}
@@ -135,7 +143,7 @@ func (r *RabbitMQQueue) StopConsuming() error {
 		return m.ErrMessageMiddlewareDisconnected
 	}
 
-	err := r.ch.Cancel(r.tag, false)
+	err := r.conn.StopConsuming(r.tag)
 	if err != nil {
 		return m.ErrMessageMiddlewareMessage
 	}
@@ -146,18 +154,13 @@ func (r *RabbitMQQueue) StopConsuming() error {
 }
 
 func (r *RabbitMQQueue) Close() error {
-	var err error
-	if r.ch != nil && !r.ch.IsClosed() {
-		if chErr := r.ch.Close(); chErr != nil {
-			err = chErr
-		}
+	r.lock.Lock()
+	if r.consuming {
+		r.consuming = false
+		close(r.stopChan)
 	}
-	if r.conn != nil && !r.conn.IsClosed() {
-		if connErr := r.conn.Close(); connErr != nil {
-			err = connErr
-		}
-	}
-
+	r.lock.Unlock()
+	err := r.conn.Close()
 	if err != nil {
 		return m.ErrMessageMiddlewareClose
 	}
