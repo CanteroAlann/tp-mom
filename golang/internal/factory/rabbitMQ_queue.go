@@ -2,18 +2,11 @@ package factory
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	m "github.com/7574-sistemas-distribuidos/tp-mom/golang/internal/middleware"
 	amqp "github.com/rabbitmq/amqp091-go"
-)
-
-var (
-	ErrRabbitMQCreateQueueMiddleware = errors.New("error creating RabbitMQ queue middleware")
-	ErrRabbitMQCreateChannel         = errors.New("error creating RabbitMQ channel")
-	ErrRabbitMQDeclareQueue          = errors.New("error declaring RabbitMQ queue")
 )
 
 type RabbitMQQueue struct {
@@ -49,7 +42,7 @@ func NewRabbitMQQueue(queueName string, settings m.ConnSettings) (*RabbitMQQueue
 	if err != nil {
 		ch.Close()
 		conn.Close()
-		return nil, m.ErrMessageMiddlewareMessage
+		return nil, ErrRabbitMQDeclareQueue
 	}
 
 	return &RabbitMQQueue{
