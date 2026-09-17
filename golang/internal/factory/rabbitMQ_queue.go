@@ -74,7 +74,7 @@ func (r *RabbitMQQueue) Send(msg m.Message) error {
 		},
 	)
 	if err != nil {
-		if r.conn.IsClosed() {
+		if err == amqp.ErrClosed {
 			return m.ErrMessageMiddlewareDisconnected
 		}
 		return m.ErrMessageMiddlewareMessage
@@ -92,6 +92,9 @@ func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func
 		r.lock.Unlock()
 		return nil
 	}
+	r.consuming = true
+	r.stopChan = make(chan struct{})
+	r.lock.Unlock()
 
 	ch := r.conn.GetChannel()
 	deliveries, err := ch.Consume(
@@ -104,13 +107,11 @@ func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func
 		nil,
 	)
 	if err != nil {
-		r.lock.Unlock()
+		if err == amqp.ErrClosed {
+			return m.ErrMessageMiddlewareDisconnected
+		}
 		return m.ErrMessageMiddlewareMessage
 	}
-
-	r.consuming = true
-	r.stopChan = make(chan struct{})
-	r.lock.Unlock()
 
 	for {
 		select {
@@ -118,10 +119,10 @@ func (r *RabbitMQQueue) StartConsuming(callbackFunc func(msg m.Message, ack func
 			return nil
 		case d, ok := <-deliveries:
 			if !ok {
-				r.lock.Lock()
-				r.consuming = false
-				r.lock.Unlock()
-				return m.ErrMessageMiddlewareDisconnected
+				if r.conn.IsClosed() {
+					return m.ErrMessageMiddlewareDisconnected
+				}
+				return m.ErrMessageMiddlewareMessage
 			}
 			ack := func() { _ = d.Ack(false) }
 			nack := func() { _ = d.Nack(false, true) }

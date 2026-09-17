@@ -101,7 +101,7 @@ func (r *RabbitMQExchange) StartConsuming(callbackFunc func(msg m.Message, ack f
 		nil,         // args
 	)
 	if err != nil {
-		if r.conn.IsClosed() {
+		if err == amqp.ErrClosed {
 			return m.ErrMessageMiddlewareDisconnected
 		}
 		return m.ErrMessageMiddlewareMessage
@@ -176,7 +176,7 @@ func (r *RabbitMQExchange) Send(msg m.Message) error {
 			},
 		)
 		if err != nil {
-			if r.conn.IsClosed() {
+			if err == amqp.ErrClosed {
 				return m.ErrMessageMiddlewareDisconnected
 			}
 			return m.ErrMessageMiddlewareMessage

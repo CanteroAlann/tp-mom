@@ -36,13 +36,13 @@ func (r *RabbitMQConnection) GetChannel() *amqp.Channel {
 
 func (r *RabbitMQConnection) Close() error {
 	if r.ch != nil && !r.ch.IsClosed() {
-		if err := r.ch.Close(); err != nil {
+		if err := r.ch.Close(); err != nil && err != amqp.ErrClosed {
 			return err
 		}
 	}
 
 	if r.conn != nil && !r.conn.IsClosed() {
-		if err := r.conn.Close(); err != nil {
+		if err := r.conn.Close(); err != nil && err != amqp.ErrClosed {
 			return err
 		}
 	}
